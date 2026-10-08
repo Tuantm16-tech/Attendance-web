@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Điểm danh</title>
+<style>
+  :root { --bg:#f3f5f4; --ink:#1b2421; --in:#1f7a5a; --out:#b5532a; --muted:#66716c; --line:#d5dbd8; }
+  * { box-sizing: border-box; }
+  html, body { min-height:100%; margin:0; }
+  body { background:var(--bg); color:var(--ink); font-family: system-ui, "Segoe UI", Roboto, sans-serif;
+         display:flex; flex-direction:column; align-items:center; justify-content:center; gap:18px; padding:20px; }
+  .time { text-align:center; }
+  #date { font-size:clamp(1.1rem,3vw,1.6rem); color:var(--muted); font-weight:600; }
+  #clock { font-size:clamp(2rem,6vw,3.5rem); font-weight:700; letter-spacing:.02em; }
+  .cam { position:relative; width:min(90vw,520px); aspect-ratio:4/3; border-radius:20px; overflow:hidden; background:#101513; }
+  video { width:100%; height:100%; object-fit:cover; transform:scaleX(-1); }
+  #status { min-height:2.4em; max-width:min(90vw,520px); font-size:clamp(1.15rem,3vw,1.7rem); text-align:center; font-weight:600; }
+  #status.ok { color:var(--in); } #status.err { color:var(--out); } #status.wait { color:var(--muted); }
+  .btns { display:flex; gap:16px; width:min(90vw,520px); }
+  button { flex:1; padding:26px 0; font-size:clamp(1.3rem,4vw,2rem); font-weight:700; color:#fff; border:0; border-radius:16px; cursor:pointer; }
+  button:focus-visible, input:focus-visible { outline:4px solid #000; outline-offset:3px; }
+  button:disabled { opacity:.45; }
+  #btnIn { background:var(--in); } #btnOut { background:var(--out); }
+  #btnRetry { display:none; background:#33403a; padding:16px 0; font-size:1.2rem; width:min(90vw,520px); flex:none; }
+  /* chế độ admin đăng ký khuôn mặt (?admin=1) */
+  #admin { display:none; width:min(90vw,520px); flex-direction:column; gap:10px; }
+  #admin input { padding:14px; font-size:1.1rem; border:1px solid var(--line); border-radius:10px; width:100%; }
+  #btnEnroll { background:#2d4f8a; }
+  body.admin .btns { display:none; } body.admin #admin { display:flex; }
+  body.admin::before { content:"Chế độ đăng ký khuôn mặt (admin)"; font-weight:700; color:#2d4f8a; }
+</style>
+</head>
+<body>
+  <div class="time">
+    <div id="date"></div>
+    <div id="clock"></div>
+  </div>
+
+  <div class="cam"><video id="video" autoplay muted playsinline></video></div>
+  <div id="status" class="wait" role="status" aria-live="polite">Đang khởi động…</div>
+
+  <div class="btns">
+    <button id="btnIn" disabled>Check in</button>
+    <button id="btnOut" disabled>Check out</button>
+  </div>
+  <button id="btnRetry">Thử lại camera</button>
+
+  <div id="admin">
+    <input id="fId"   placeholder="Mã nhân viên" autocomplete="off">
+    <input id="fName" placeholder="Họ tên" autocomplete="off">
+    <input id="fDept" placeholder="Phòng ban (không bắt buộc)" autocomplete="off">
+    <input id="fPass" placeholder="Mật khẩu admin" type="password" autocomplete="off">
+    <button id="btnEnroll" disabled>Lưu khuôn mặt</button>
+  </div>
+
+<!-- Thư viện nhận diện khuôn mặt: Human (vladmandic) -->
+<script src="https://cdn.jsdelivr.net/npm/@vladmandic/human@3.3.6/dist/human.js"></script>
+<script>
+// ================= CẤU HÌNH =================
+const CONFIG = {
+  API_URL: 'https://script.google.com/a/macros/zvehb.com.vn/s/AKfycbzUWIwvLudE_jKPGLSAeColVzGQJi7K0QkyGjdVcEu_eM2q-VDaoJuvpxOpJTyHC24s3g/exec',   // dạng https://script.google.com/macros/s/.../exec
+  MODEL_URL: 'https://cdn.jsdelivr.net/npm/@vladmandic/human@3.3.6/models/',
+  MATCH: { order: 2, multiplier: 25, min: 0.2, max: 0.8 }, // tham số so khớp cho model faceres
+  SIMILARITY: 0.5,       // độ giống tối thiểu để coi là cùng người (0..1). Tăng = chặt hơn
+  MIN_CONF: 0.6,         // ngưỡng tin cậy của khuôn mặt / mặt thật
+  USE_ANTISPOOF: true,   // chống dùng ảnh/màn hình điện thoại. Nếu hay báo nhầm, đặt false
+  SCAN_MS: 10000,        // thời gian tối đa nhận diện sau khi bấm nút
+  ENROLL_SAMPLES: 5,     // số mẫu ảnh khi đăng ký
+  CONFIRM_FRAMES: 2,     // số khung hình liên tiếp phải khớp cùng một người
+};
+
+const IS_ADMIN = new URLSearchParams(location.search).get('admin') === '1';
+if (IS_ADMIN) document.body.classList.add('admin');
+
+const $ = id => document.getElementById(id);
+const video = $('video'), statusEl = $('status');
+let human, db = [], busy = false;
+
+function setStatus(text, cls) { statusEl.textContent = text; statusEl.className = cls || 'wait'; }
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// ---------- Ngày giờ ----------
+function tick() {
+  const now = new Date();
+  $('date').textContent = now.toLocaleDateString('vi-VN', { weekday:'long', day:'2-digit', month:'2-digit', year:'numeric' });
+  $('clock').textContent = now.toLocaleTimeString('vi-VN');
+}
+tick(); setInterval(tick, 1000);
+
+// ---------- Camera ----------
+async function startCamera() {
+  if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    throw new Error('INSECURE');
+  }
+  if (video.srcObject) video.srcObject.getTracks().forEach(t => t.stop());
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: false,
+    video: { facingMode: 'user', width: { ideal: 1280 }, height: { ideal: 720 } },
+  });
+  video.srcObject = stream;
+  await new Promise(res => { video.onloadedmetadata = res; });
+  await video.play();
+}
+
+function cameraErrorText(err) {
+  switch (err && (err.name || err.message)) {
+    case 'INSECURE':
+      return 'Camera chỉ chạy trên trang HTTPS. Hãy mở trang bằng địa chỉ https:// (không mở trực tiếp file hoặc http://).';
+    case 'NotAllowedError': case 'PermissionDeniedError': case 'SecurityError':
+      return 'Camera đang bị chặn. Bấm biểu tượng ổ khóa cạnh địa chỉ trang, chọn Quyền → Camera → Cho phép, rồi bấm Thử lại camera.';
+    case 'NotFoundError': case 'OverconstrainedError': case 'DevicesNotFoundError':
+      return 'Không tìm thấy camera trước trên thiết bị này.';
+    case 'NotReadableError': case 'TrackStartError':
+      return 'Camera đang được ứng dụng khác sử dụng. Hãy đóng ứng dụng đó rồi bấm Thử lại camera.';
+    default:
+      return 'Không mở được camera: ' + (err && (err.message || err.name));
+  }
+}
+
+// ---------- Khởi tạo ----------
+async function init() {
+  $('btnRetry').style.display = 'none';
+  $('btnIn').disabled = $('btnOut').disabled = $('btnEnroll').disabled = true;
+  try {
+    setStatus('Đang mở camera…');
+    await startCamera();
+  } catch (err) {
+    setStatus(cameraErrorText(err), 'err');
+    $('btnRetry').style.display = 'block';
+    return;
+  }
+  try {
+    if (!human) {
+      setStatus('Đang tải mô hình nhận diện (lần đầu có thể mất 10–20 giây)…');
+      human = new Human.Human({
+        modelBasePath: CONFIG.MODEL_URL,
+        cacheSensitivity: 0,
+        filter: { enabled: true, equalization: true },
+        face: {
+          enabled: true,
+          detector: { rotation: true, maxDetected: 2 },
+          mesh: { enabled: true },
+          iris: { enabled: false },
+          description: { enabled: true },           // tạo vector đặc trưng khuôn mặt
+          emotion: { enabled: false },
+          antispoof: { enabled: CONFIG.USE_ANTISPOOF },
+          liveness: { enabled: CONFIG.USE_ANTISPOOF },
+        },
+        body: { enabled: false }, hand: { enabled: false },
+        object: { enabled: false }, gesture: { enabled: false },
+      });
+      await human.load();
+      await human.warmup();
+    }
+    setStatus('Đang tải danh sách nhân viên…');
+    await loadDb();
+  } catch (err) {
+    setStatus('Lỗi tải dữ liệu: ' + (err.message || err) + '. Kiểm tra mạng và API_URL.', 'err');
+    $('btnRetry').style.display = 'block';
+    return;
+  }
+  if (IS_ADMIN) {
+    $('btnEnroll').disabled = false;
+    setStatus('Nhập thông tin nhân viên, nhìn thẳng vào camera rồi bấm Lưu khuôn mặt.');
+  } else {
+    $('btnIn').disabled = $('btnOut').disabled = false;
+    idleMessage();
+  }
+}
+function idleMessage() { setStatus('Nhìn vào camera rồi bấm Check in hoặc Check out'); }
+
+async function loadDb() {
+  const res = await fetch(CONFIG.API_URL);
+  db = await res.json();
+  if (!Array.isArray(db)) throw new Error('Phản hồi không hợp lệ từ Apps Script');
+  if (!db.length && !IS_ADMIN) {
+    setStatus('Chưa có nhân viên nào được đăng ký. Vui lòng liên hệ admin.', 'err');
+  }
+}
+
+// ---------- Lấy 1 khung hình hợp lệ ----------
+async function grab() {
+  const res = await human.detect(video);
+  const faces = res.face || [];
+  if (!faces.length) return { state: 'none' };
+  if (faces.length > 1) return { state: 'multi' };
+  const f = faces[0];
+  if ((f.score || 0) < CONFIG.MIN_CONF || !f.embedding || !f.embedding.length) return { state: 'weak' };
+  if (f.box[2] < video.videoWidth * 0.22) return { state: 'far' };
+  if (CONFIG.USE_ANTISPOOF && ((f.real ?? 1) < CONFIG.MIN_CONF || (f.live ?? 1) < CONFIG.MIN_CONF)) {
+    return { state: 'spoof' };
+  }
+  return { state: 'ok', face: f };
+}
+
+const HINTS = {
+  none:  'Không thấy khuôn mặt. Hãy nhìn thẳng vào camera và thử lại.',
+  multi: 'Có nhiều hơn một khuôn mặt trong khung hình. Chỉ một người đứng trước camera.',
+  weak:  'Khuôn mặt chưa rõ. Hãy giữ yên và đảm bảo đủ sáng.',
+  far:   'Bạn đứng quá xa. Hãy lại gần camera hơn.',
+  spoof: 'Không xác minh được khuôn mặt thật. Hãy nhìn trực tiếp vào camera.',
+};
+
+function findMatch(embedding) {
+  if (!db.length) return null;
+  const r = human.match.find(embedding, db.map(p => p.embedding), CONFIG.MATCH);
+  return { person: db[r.index], similarity: r.similarity };
+}
+
+// ---------- Check in / Check out ----------
+async function attend(type) {
+  if (busy) return;
+  busy = true;
+  $('btnIn').disabled = $('btnOut').disabled = true;
+  setStatus('Đang nhận diện…');
+
+  const t0 = Date.now();
+  const stats = { none: 0, multi: 0, weak: 0, far: 0, spoof: 0, unknown: 0 };
+  let streakId = null, streak = 0, found = null;
+
+  while (Date.now() - t0 < CONFIG.SCAN_MS && !found) {
+    const g = await grab();
+    if (g.state !== 'ok') { stats[g.state]++; streakId = null; streak = 0; continue; }
+    const m = findMatch(g.face.embedding);
+    if (m && m.similarity >= CONFIG.SIMILARITY) {
+      if (streakId === m.person.id) streak++; else { streakId = m.person.id; streak = 1; }
+      if (streak >= CONFIG.CONFIRM_FRAMES) found = m;
+    } else {
+      stats.unknown++; streakId = null; streak = 0;
+    }
+  }
+
+  if (found) {
+    try {
+      const r = await fetch(CONFIG.API_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain' },   // tránh preflight CORS với Apps Script
+        body: JSON.stringify({
+          id: found.person.id, name: found.person.name, type,
+          similarity: +found.similarity.toFixed(3),
+        }),
+      });
+      const j = await r.json();
+      if (!j.ok) throw new Error(j.error || 'Lỗi máy chủ');
+      const t = new Date().toLocaleTimeString('vi-VN');
+      const act = type === 'IN' ? 'check in' : 'check out';
+      setStatus(j.duplicate
+        ? `${found.person.name} đã ${act} trước đó, không ghi lại.`
+        : `${found.person.name} đã ${act} lúc ${t}`, 'ok');
+    } catch (err) {
+      setStatus('Không gửi được dữ liệu: ' + (err.message || err), 'err');
+    }
+  } else if (stats.unknown >= 3) {
+    setStatus('Bạn chưa được đăng ký trên hệ thống. Vui lòng đăng ký.', 'err');
+  } else {
+    const top = Object.entries(stats).filter(([k]) => k !== 'unknown').sort((a, b) => b[1] - a[1])[0];
+    setStatus(top && top[1] > 0 ? HINTS[top[0]] : 'Chưa nhận diện được. Hãy giữ yên khuôn mặt và thử lại.', 'err');
+  }
+
+  await sleep(4000);
+  busy = false;
+  $('btnIn').disabled = $('btnOut').disabled = false;
+  idleMessage();
+}
+
+// ---------- Đăng ký khuôn mặt (?admin=1) ----------
+async function enroll() {
+  if (busy) return;
+  const id = $('fId').value.trim(), name = $('fName').value.trim(),
+        dept = $('fDept').value.trim(), password = $('fPass').value;
+  if (!id || !name || !password) { setStatus('Vui lòng nhập mã nhân viên, họ tên và mật khẩu admin.', 'err'); return; }
+
+  busy = true; $('btnEnroll').disabled = true;
+  const samples = []; const t0 = Date.now(); let lastHint = null;
+  setStatus(`Nhìn thẳng vào camera… (0/${CONFIG.ENROLL_SAMPLES})`);
+  while (samples.length < CONFIG.ENROLL_SAMPLES && Date.now() - t0 < 30000) {
+    const g = await grab();
+    if (g.state === 'ok') {
+      samples.push(g.face.embedding);
+      setStatus(`Đang chụp… (${samples.length}/${CONFIG.ENROLL_SAMPLES}). Xoay mặt nhẹ sang hai bên.`);
+      await sleep(700);
+    } else { lastHint = HINTS[g.state]; }
+  }
+  if (samples.length < CONFIG.ENROLL_SAMPLES) {
+    setStatus(lastHint || 'Không chụp đủ mẫu, hãy thử lại.', 'err');
+    busy = false; $('btnEnroll').disabled = false; return;
+  }
+
+  // Trung bình các mẫu thành 1 vector
+  const len = samples[0].length, avg = new Array(len).fill(0);
+  for (const s of samples) for (let i = 0; i < len; i++) avg[i] += s[i] / samples.length;
+  const embedding = avg.map(v => +v.toFixed(4));
+
+  // Báo nếu khuôn mặt này đã thuộc về mã nhân viên khác
+  const dup = findMatch(embedding);
+  if (dup && dup.similarity >= CONFIG.SIMILARITY + 0.1 && dup.person.id !== id) {
+    setStatus(`Khuôn mặt này đã đăng ký với mã ${dup.person.id} (${dup.person.name}). Không lưu.`, 'err');
+    busy = false; $('btnEnroll').disabled = false; return;
+  }
+
+  try {
+    const r = await fetch(CONFIG.API_URL, {
+      method: 'POST', headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify({ action: 'enroll', password, id, name, dept, embedding }),
+    });
+    const j = await r.json();
+    if (!j.ok) throw new Error(j.error || 'Lỗi máy chủ');
+    await loadDb();
+    setStatus(`Đã ${j.updated ? 'cập nhật' : 'đăng ký'} khuôn mặt cho ${name} (${id}).`, 'ok');
+    $('fId').value = $('fName').value = $('fDept').value = '';
+  } catch (err) {
+    setStatus('Không lưu được: ' + (err.message || err), 'err');
+  }
+  busy = false; $('btnEnroll').disabled = false;
+}
+
+$('btnIn').onclick = () => attend('IN');
+$('btnOut').onclick = () => attend('OUT');
+$('btnEnroll').onclick = enroll;
+$('btnRetry').onclick = init;
+init();
+</script>
+</body>
+</html>
