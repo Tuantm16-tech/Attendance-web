@@ -59,7 +59,7 @@
 <script>
 // ================= CẤU HÌNH =================
 const CONFIG = {
-  API_URL: 'https://script.google.com/a/macros/zvehb.com.vn/s/AKfycbzUWIwvLudE_jKPGLSAeColVzGQJi7K0QkyGjdVcEu_eM2q-VDaoJuvpxOpJTyHC24s3g/exec',   // dạng https://script.google.com/macros/s/.../exec
+  API_URL: 'https://script.google.com/a/macros/zvehb.com.vn/s/AKfycbwkSO6uGn4pP7Y1sk4KD5MY9fo2fqN21-1-3YwPcbz2G29POLrWlEqiwZ3PW_tY4hg-sA/exec',   // dạng https://script.google.com/macros/s/.../exec
   MODEL_URL: 'https://cdn.jsdelivr.net/npm/@vladmandic/human@3.3.6/models/',
   MATCH: { order: 2, multiplier: 25, min: 0.2, max: 0.8 }, // tham số so khớp cho model faceres
   SIMILARITY: 0.5,       // độ giống tối thiểu để coi là cùng người (0..1). Tăng = chặt hơn
@@ -156,7 +156,7 @@ async function init() {
     setStatus('Đang tải danh sách nhân viên…');
     await loadDb();
   } catch (err) {
-    setStatus('Lỗi tải dữ liệu: ' + (err.message || err) + '. Kiểm tra mạng và API_URL.', 'err');
+    setStatus('Lỗi tải dữ liệu: ' + (err.message || err), 'err');
     $('btnRetry').style.display = 'block';
     return;
   }
@@ -171,9 +171,21 @@ async function init() {
 function idleMessage() { setStatus('Nhìn vào camera rồi bấm Check in hoặc Check out'); }
 
 async function loadDb() {
-  const res = await fetch(CONFIG.API_URL);
-  db = await res.json();
-  if (!Array.isArray(db)) throw new Error('Phản hồi không hợp lệ từ Apps Script');
+  if (!CONFIG.API_URL || CONFIG.API_URL.includes('DÁN_URL')) {
+    throw new Error('Chưa dán URL Apps Script (/exec) vào API_URL trong index.html');
+  }
+  let res;
+  try {
+    res = await fetch(CONFIG.API_URL);
+  } catch (e) {
+    throw new Error('Không kết nối được tới Apps Script. Kiểm tra: URL kết thúc bằng /exec, quyền truy cập là "Anyone", và đã Deploy bản New version của Code.gs dạng API');
+  }
+  try {
+    db = await res.json();
+  } catch (e) {
+    throw new Error('Apps Script trả về trang web thay vì dữ liệu JSON. Hãy dán Code.gs dạng API (thư mục diem-danh) rồi Deploy New version');
+  }
+  if (!Array.isArray(db)) throw new Error('Phản hồi không hợp lệ từ Apps Script: ' + JSON.stringify(db).slice(0, 120));
   if (!db.length && !IS_ADMIN) {
     setStatus('Chưa có nhân viên nào được đăng ký. Vui lòng liên hệ admin.', 'err');
   }
